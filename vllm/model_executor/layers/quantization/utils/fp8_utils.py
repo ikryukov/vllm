@@ -56,7 +56,7 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
 ) -> torch.Tensor:
     import aiter as rocm_aiter
 
-    return rocm_aiter.gemm_a8w8_blockscale_CK(A, B, As, Bs, dtype=output_dtype)
+    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_fake(
@@ -378,8 +378,6 @@ def per_token_group_quant_fp8(
         is supported for now.
         column_major_scales: Outputs scales in column major.
         out_q: Optional output tensor. If not provided, function will create.
-        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
-        scaling factor for quantization.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
