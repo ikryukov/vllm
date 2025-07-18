@@ -188,6 +188,7 @@ class UCCAllreduce:
         if op not in ucc_op_map:
             raise ValueError(f"Unsupported operation: {op}")
 
+        logger.info(f"UCC allreduce: count {inp.numel()}, dtype {inp.dtype}, op {op}")
         # Perform UCC allreduce
         request = self.ucc_team.allreduce(
             src=inp.data_ptr(),
