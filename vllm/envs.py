@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_UCC_ALLREDUCE: bool = False
 
 
 def get_default_cache_root():
@@ -974,6 +975,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+
+    # If set to 1, use UCC allreduce
+    "VLLM_UCC_ALLREDUCE":
+    lambda: bool(int(os.getenv("VLLM_UCC_ALLREDUCE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
