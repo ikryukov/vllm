@@ -29,6 +29,7 @@ WORKDIR /workspace/vllm
 
 RUN python3 use_existing_torch.py
 RUN pip install -r requirements/build.txt
+RUN pip install "numpy<2" datasets
 RUN pip install --no-build-isolation -e .
 
 
