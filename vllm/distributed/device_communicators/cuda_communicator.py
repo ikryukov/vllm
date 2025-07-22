@@ -31,7 +31,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
 
-        self.ucc_group = torch.distributed.new_group(self.ranks, backend="ucc")
+        if envs.VLLM_UCC_ALLREDUCE:
+            self.ucc_group = torch.distributed.new_group(self.ranks, backend="ucc")
+        else:
+            self.ucc_group = None
+
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
 
@@ -75,7 +79,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # Initialize UCC allreduce if available
         self.ucc_comm: Optional[UCCAllreduce] = None
-        if self.world_size > 1:
+        if envs.VLLM_UCC_ALLREDUCE and self.world_size > 1:
             self.ucc_comm = UCCAllreduce(
                 group=self.ucc_group,
                 device=self.device,

@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_UCC_ALLREDUCE: bool = False
 
 
 def get_default_cache_root():
@@ -1003,6 +1004,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+
+    # If set to 1, use UCC allreduce
+    "VLLM_UCC_ALLREDUCE":
+    lambda: bool(int(os.getenv("VLLM_UCC_ALLREDUCE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
