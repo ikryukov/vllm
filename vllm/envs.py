@@ -156,6 +156,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_UCC_ALLREDUCE: bool = False
 
 
 def get_default_cache_root():
@@ -1108,6 +1109,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # If set to 1, use UCC allreduce
+    "VLLM_UCC_ALLREDUCE":
+    lambda: bool(int(os.getenv("VLLM_UCC_ALLREDUCE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
