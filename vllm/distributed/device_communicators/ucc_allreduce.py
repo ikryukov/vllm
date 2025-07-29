@@ -126,8 +126,11 @@ class UCCAllreduce:
         Returns:
             True if UCC backend is available, False otherwise.
         """
+        if hasattr(dist, "is_ucc_available"):
+            return dist.is_ucc_available()
         try:
-            return hasattr(dist.Backend, 'UCC') or 'ucc' in dist.Backend.__dict__.values()
+            return hasattr(dist.Backend,
+                           "UCC") or "ucc" in dist.Backend.__dict__.values()
         except Exception:
             return False
 
