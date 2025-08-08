@@ -14,7 +14,7 @@ RUN source .venv/bin/activate
 # Create workspace directory
 RUN mkdir -p /workspace/vllm
 
-ENV MAX_JOBS=24
+ENV MAX_JOBS=32
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
