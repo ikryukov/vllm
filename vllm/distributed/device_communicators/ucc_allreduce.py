@@ -104,12 +104,10 @@ class UCCAllreduce:
         if self.disabled:
             return False
 
-        # UCC allreduce is beneficial for larger tensors
-        # and when using multiple processes
         tensor_size = tensor.numel() * tensor.element_size()
 
-        # Use UCC for tensors larger than 1MB and when world size > 1
-        return tensor_size > 1024 * 1024 and self.world_size > 1
+        # Use UCC for tensors less than 512MB and when world size > 1
+        return tensor_size < 512 * 1024 * 1024 and self.world_size > 1
 
     def close(self) -> None:
         """

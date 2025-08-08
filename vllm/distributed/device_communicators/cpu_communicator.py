@@ -7,11 +7,15 @@ from typing import Any, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.distributed.utils import pickle
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
@@ -24,6 +28,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
+        if envs.VLLM_UCC_ALLREDUCE:
+            self.ucc_group = torch.distributed.new_group(self.ranks, backend="ucc")
+            logger.info("UCCAllreduce initialized successfully with UCC backend on device %s, world size: %d", self.device, self.world_size)
+        else:
+            self.ucc_group = None
+
         if (current_platform.get_cpu_architecture()
                 == CpuArchEnum.X86) and hasattr(
                     torch.ops._C,
@@ -32,7 +42,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.dist_module = _CPUSHMDistributed(self)
 
     def all_reduce(self, input_):
-        self.dist_module.all_reduce(input_, group=self.device_group)
+        """Perform all-reduce operation using the optimal backend."""
+        if envs.VLLM_UCC_ALLREDUCE:
+            torch.distributed.all_reduce(input_, group=self.ucc_group)
+        else:
+            self.dist_module.all_reduce(input_, group=self.device_group)
+
         return input_
 
     def gather(self,
