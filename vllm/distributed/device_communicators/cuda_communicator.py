@@ -87,6 +87,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPLLAll2AllManager
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
                 logger.info("Using DeepEP Low-Latency all2all manager.")
+            elif all2all_backend == "ucc":
+                from .all2all import UccAll2AllManager
+                self.all2all_manager = UccAll2AllManager(self.cpu_group)
+                logger.info("Using UCC all2all manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 

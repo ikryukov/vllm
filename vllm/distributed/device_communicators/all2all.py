@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed as dist
 
+from typing import List, Optional
+
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
@@ -262,3 +264,110 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         # in get_or_create must be updated.
         handle.set_num_sms(self.num_sms)
         return handle
+
+class UccAll2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group: dist.ProcessGroup, top_k: int = 1):
+        super().__init__(cpu_group)
+        try:
+            self.group = dist.new_group(backend="ucc")
+        except ValueError as e:
+            logger.warning(f"UCC backend not available: {e}. Falling back to default group.")
+            self.group = cpu_group
+        self.world_size = dist.get_world_size(self.group)
+        self.rank = dist.get_rank(self.group)
+        self.top_k = top_k
+        # Storage for dispatch info used in combine
+        self.per_dest_indices: List[torch.Tensor] = []
+        self.recv_counts: List[int] = []
+        self.recv_offsets: List[int] = []
+
+    def dispatch(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Clear stored info
+        self.per_dest_indices = [[] for _ in range(self.world_size)]
+        self.recv_counts = []
+        self.recv_offsets = [0]
+
+        # Compute routing
+        if router_logits.shape[1] != self.world_size:
+            raise ValueError("Number of experts must match world size for this implementation.")
+        probs = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+        top_k_prob, top_k_expert = torch.topk(probs, k=self.top_k, dim=-1)  # [num_tokens, top_k]
+        # Renormalize top-k probs
+        top_k_prob = top_k_prob / top_k_prob.sum(dim=-1, keepdim=True)
+
+        num_tokens = hidden_states.shape[0]
+        # Expanded indices
+        token_ids = torch.arange(num_tokens, device=hidden_states.device).unsqueeze(1).expand(-1, self.top_k).flatten()
+        dest = top_k_expert.flatten()  # [num_tokens * top_k]
+
+        # Prepare send lists for hidden_states and router_logits
+        hidden_send_lists: List[List[torch.Tensor]] = [[] for _ in range(self.world_size)]
+        router_send_lists: List[List[torch.Tensor]] = [[] for _ in range(self.world_size)]
+        for i in range(len(dest)):
+            r = dest[i].item()
+            token_id = token_ids[i]
+            hidden_send_lists[r].append(hidden_states[token_id:token_id+1])
+            router_send_lists[r].append(router_logits[token_id:token_id+1])
+            self.per_dest_indices[r].append(token_id)
+
+        # Convert indices to tensors
+        for r in range(self.world_size):
+            self.per_dest_indices[r] = torch.tensor(self.per_dest_indices[r], dtype=torch.long, device=hidden_states.device)
+
+        # Concat send tensors, handle empty
+        send_hidden = [torch.cat(lst, dim=0) if lst else torch.empty((0, hidden_states.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype) for lst in hidden_send_lists]
+        send_router = [torch.cat(lst, dim=0) if lst else torch.empty((0, router_logits.shape[1]), device=router_logits.device, dtype=router_logits.dtype) for lst in router_send_lists]
+
+        # Prepare recv lists
+        recv_hidden = [torch.empty_like(s) for s in send_hidden]
+        recv_router = [torch.empty_like(s) for s in send_router]
+
+        # All-to-all collectives
+        dist.all_to_all(recv_hidden, send_hidden, group=self.group)
+        dist.all_to_all(recv_router, send_router, group=self.group)
+
+        # Concat received
+        local_hidden = torch.cat(recv_hidden, dim=0)
+        local_router = torch.cat(recv_router, dim=0)
+
+        # Store recv info for combine
+        self.recv_counts = [r.shape[0] for r in recv_hidden]
+        offset = 0
+        for c in self.recv_counts:
+            offset += c
+            self.recv_offsets.append(offset)
+
+        return local_hidden, local_router
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # hidden_states here is the output from local experts, shape like local_hidden
+
+        # Prepare send lists: split local by received chunks
+        send_lists: List[torch.Tensor] = []
+        offset = 0
+        for c in self.recv_counts:
+            slice_tensor = hidden_states[offset:offset + c] if c > 0 else torch.empty((0, hidden_states.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
+            send_lists.append(slice_tensor)
+            offset += c
+
+        # Prepare recv lists
+        recv_lists = [torch.empty_like(s) for s in send_lists]
+
+        # All-to-all
+        dist.all_to_all(recv_lists, send_lists, group=self.group)
+
+        # Reassemble combined in original order with summing contributions
+        num_tokens = self.recv_offsets[-1] // self.top_k  # Approximate, but actually from dispatch num_tokens
+        # Better: num_tokens = max over all per_dest_indices +1, but since indices are 0 to num_tokens-1
+        num_tokens = 0 if not self.per_dest_indices else (max(max(idx) for idx in self.per_dest_indices if idx.numel() > 0) + 1).item()
+
+        combined = torch.zeros((num_tokens, hidden_states.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
+        for r in range(self.world_size):
+            if self.per_dest_indices[r].numel() > 0:
+                combined.index_add_(0, self.per_dest_indices[r], recv_lists[r])
+
+        return combined
+
+    def destroy(self) -> None:
+        if self.group != self.cpu_group:  # Only destroy if new group created
+            dist.destroy_process_group(self.group)

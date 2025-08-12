@@ -980,6 +980,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
+    # - "ucc": use PyTorch UCC backend (if available) for broadcast/all-reduce based naive routing
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
