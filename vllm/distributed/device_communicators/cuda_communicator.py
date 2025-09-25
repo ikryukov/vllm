@@ -46,6 +46,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
+        from vllm.distributed.device_communicators.perun_communicator import (
+            PerunCommunicator)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -58,6 +60,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+        self.perun_comm: Optional[PerunCommunicator] = None
+        if envs.VLLM_USE_PERUN and self.world_size > 1:
+            logger.info("Using Perun communicator.")
+            self.perun_comm = PerunCommunicator(
                 group=self.cpu_group,
                 device=self.device,
             )
@@ -132,6 +141,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
+        perun_comm = self.perun_comm
+        if perun_comm is not None and not perun_comm.disabled and \
+            perun_comm.should_use_perun_allreduce(input_):
+            out = perun_comm.all_reduce(input_)
+            if out is not None:
+                return out
         ucc_comm = self.ucc_comm
         if ucc_comm is not None and not ucc_comm.disabled and \
             ucc_comm.should_use_ucc_allreduce(input_):

@@ -192,6 +192,7 @@ if TYPE_CHECKING:
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
     VLLM_USE_UCC: bool = False
+    VLLM_USE_PERUN: bool = False
 
 
 def get_default_cache_root():
@@ -1404,6 +1405,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use UCC allreduce
     "VLLM_USE_UCC":
     lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
+
+    # If set to 1, use Perun allreduce
+    "VLLM_USE_PERUN":
+    lambda: bool(int(os.getenv("VLLM_USE_PERUN", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
