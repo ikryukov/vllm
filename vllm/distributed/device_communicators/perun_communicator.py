@@ -4,12 +4,17 @@ import logging
 from typing import Optional, Union
 
 import numpy as np
-import perun
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.utils import current_stream
+
+try:
+    import perun
+    perun_available = True
+except ImportError:
+    perun_available = False
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +24,17 @@ class PerunCommunicator:
     def __init__(self, group: ProcessGroup,
                  device: Union[int, str, torch.device]) -> None:
         self.disabled = True
+
+        if not perun_available:
+            logger.warning(
+                "Perun module not available. Perun communicator disabled.")
+            return
+
         self.world_size = dist.get_world_size(group)
         self.rank = dist.get_rank(group)
+
         self._comm = perun.comm_create(self.world_size, self.rank)
+
         # Get the current CUDA stream for the current device
         if torch.cuda.is_available():
             # Ensure we're using the current device and get its stream
@@ -42,7 +55,7 @@ class PerunCommunicator:
 
     def __del__(self):
         try:
-            if hasattr(self, "_comm") and self._comm:
+            if hasattr(self, "_comm") and self._comm and perun_available:
                 perun.comm_destroy(self._comm)
         except Exception:
             pass
@@ -148,9 +161,8 @@ class PerunCommunicator:
         return output.movedim(0, dim).contiguous()
 
     def all_reduce(self, input_):
-        output = torch.empty_like(input_)
         perun.allreduce(self._comm,
                         self._get_current_stream().cuda_stream,
-                        input_.data_ptr(), input_.numel(), output.data_ptr(),
+                        input_.data_ptr(), input_.numel(), input_.data_ptr(),
                         input_.dtype, torch.distributed.ReduceOp.SUM)
-        return output
+        return input_
