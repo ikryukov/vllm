@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
 from vllm.logger import init_logger
-from vllm.utils import current_stream
+from vllm.utils.torch_utils import current_stream
 
 try:
     import perun
