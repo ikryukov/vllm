@@ -40,12 +40,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
+        # ep does not use pynccl
+        use_pynccl = "ep" not in unique_name
+
+        self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
+        )
+        from vllm.distributed.device_communicators.perun_communicator import (
+            PerunCommunicator,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -61,6 +68,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
+
+        self.perun_comm: PerunCommunicator | None = None
+        if envs.VLLM_USE_PERUN and self.world_size > 1:
+            logger.info("Using Perun communicator.")
+            self.perun_comm = PerunCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
@@ -88,6 +103,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # If it's a rocm, 'use_custom_allreduce==True' means it must
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+
+        # Initialize UCC allreduce if available
+        self.ucc_comm = None
 
         if self.use_all2all:
             if self.all2all_backend == "naive":
@@ -143,6 +161,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
+        perun_comm = self.perun_comm
+        if (
+            perun_comm is not None
+            and not perun_comm.disabled
+            and perun_comm.should_use_perun_allreduce(input_)
+        ):
+            out = perun_comm.all_reduce(input_)
+            if out is not None:
+                return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None
@@ -202,8 +229,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ):
         world_size = self.world_size
-        pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -225,10 +250,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
-            pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
+        # Try Perun communicator first if available
+        perun_comm = self.perun_comm
+        if perun_comm is not None and not perun_comm.disabled and sizes is not None:
+            perun_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
         else:
-            pynccl_comm.reduce_scatter(output, input_tensor)
+            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+                pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
+            else:
+                pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -276,8 +306,35 @@ class CudaCommunicator(DeviceCommunicatorBase):
         dim: int = 0,
         sizes: list[int] | None = None,
     ):
+        input_shape = (
+            input_.shape
+            if isinstance(input_, torch.Tensor)
+            else [t.shape for t in input_]
+        )
+        logger.debug(
+            "All gatherv called with input size: %s dim: %d sizes: %s",
+            input_shape,
+            dim,
+            sizes,
+        )
+
         if dim != 0:
             raise NotImplementedError("only dim 0 all-gatherv is supported")
+
+        # Try Perun communicator first if available (now supports both single
+        # tensors and lists)
+        perun_comm = self.perun_comm
+        if perun_comm is not None and not perun_comm.disabled:
+            try:
+                result = perun_comm.all_gatherv(input_, dim=dim, sizes=sizes)
+                return result
+            except Exception as e:
+                # Fall back to pynccl if Perun has any issues
+                logger.warning(
+                    "Perun all_gatherv failed, falling back to pynccl: %s", e
+                )
+        # Fall through to pynccl
+
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
