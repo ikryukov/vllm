@@ -83,9 +83,7 @@ class PerunCommunicator:
 
     def _get_current_stream(self):
         """Get the current CUDA stream for the current device"""
-        # TODO: in vLLM use theirs implementaion
-        # return torch.cuda.current_stream(device=self._device)
-        return self._stream
+        return current_stream()
 
     def _atexit_handler(self):
         """Handler called at process exit to ensure statistics are printed."""
@@ -375,7 +373,6 @@ class PerunCommunicator:
         rc = np.asarray(recvcounts_elems, dtype=np.uint32)
 
         comm_val = self._comm
-        # stream_ptr = self._get_current_stream().cuda_stream
         stream_ptr = stream.cuda_stream
         send_ptr = input_tensor.data_ptr()
         sendcount_val = input_tensor.numel()
