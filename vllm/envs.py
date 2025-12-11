@@ -252,6 +252,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_USE_PERUN: bool = False
 
 
 def get_default_cache_root():
@@ -1041,7 +1042,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Data exceeding this size will use either custom allreduce or RCCL
     # communication.
     "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
-        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
+        os.getenv("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
     ),
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
@@ -1611,6 +1612,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # If set to 1, use Perun allreduce
+    "VLLM_USE_PERUN": lambda: bool(int(os.getenv("VLLM_USE_PERUN", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

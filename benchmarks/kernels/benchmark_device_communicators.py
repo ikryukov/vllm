@@ -30,6 +30,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
+from vllm.distributed.device_communicators.perun_communicator import PerunCommunicator
 from vllm.distributed.device_communicators.pynccl import (
     PyNcclCommunicator,
     register_nccl_symmetric_ops,
@@ -46,8 +47,8 @@ logger = init_logger(__name__)
 # Default sequence lengths to benchmark
 DEFAULT_SEQUENCE_LENGTHS = [128, 512, 1024, 2048, 4096, 8192]
 
-# Fixed hidden size and dtype for all benchmarks
-HIDDEN_SIZE = 8192
+# Default hidden size and dtype for all benchmarks
+DEFAULT_HIDDEN_SIZE = 8192
 BENCHMARK_DTYPE = torch.bfloat16
 
 # CUDA graph settings
@@ -64,15 +65,19 @@ class CommunicatorBenchmark:
         device: torch.device,
         cpu_group: ProcessGroup,
         sequence_lengths: list[int],
+        hidden_size: int = DEFAULT_HIDDEN_SIZE,
+        use_cuda_graph: bool = True,
     ):
         self.rank = rank
         self.world_size = world_size
         self.device = device
         self.cpu_group = cpu_group
+        self.hidden_size = hidden_size
+        self.use_cuda_graph = use_cuda_graph
 
         # Calculate max_size_override based on largest sequence length
         max_seq_len = max(sequence_lengths)
-        max_tensor_elements = max_seq_len * HIDDEN_SIZE
+        max_tensor_elements = max_seq_len * self.hidden_size
         self.max_size_override = max_tensor_elements * BENCHMARK_DTYPE.itemsize + 1
 
         # Initialize communicators
@@ -81,6 +86,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm = None
         self.symm_mem_comm_multimem = None
         self.symm_mem_comm_two_shot = None
+        self.perun_comm = None
 
         self._init_communicators()
 
@@ -160,6 +166,21 @@ class CommunicatorBenchmark:
                 e,
             )
             self.symm_mem_comm_two_shot = None
+        try:
+            self.perun_comm = PerunCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+            if not self.perun_comm.disabled:
+                logger.info("Rank %s: PerunCommunicator initialized", self.rank)
+            else:
+                logger.info("Rank %s: PerunCommunicator disabled", self.rank)
+                self.perun_comm = None
+        except Exception as e:
+            logger.warning(
+                "Rank %s: Failed to initialize PerunCommunicator: %s", self.rank, e
+            )
+            self.perun_comm = None
 
     def benchmark_allreduce(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -239,6 +260,18 @@ class CommunicatorBenchmark:
                 )
             )
 
+        if self.perun_comm is not None:
+            comm = self.perun_comm
+            communicators.append(
+                (
+                    "perun",
+                    lambda t, c=comm: c.all_reduce(t),
+                    lambda t: True,  # Always available if initialized
+                    nullcontext(),
+                    None,  # no env variable needed
+                )
+            )
+
         # Benchmark each communicator
         for name, allreduce_fn, should_use_fn, context, env_var in communicators:
             # Set environment variable if needed
@@ -270,23 +303,28 @@ class CommunicatorBenchmark:
         num_warmup: int,
         num_trials: int,
     ) -> float | None:
-        """Benchmark method with CUDA graph optimization."""
+        """Benchmark method with optional CUDA graph optimization."""
         try:
             # Create test tensor (2D: sequence_length x hidden_size)
             tensor = torch.randn(
-                sequence_length, HIDDEN_SIZE, dtype=BENCHMARK_DTYPE, device=self.device
+                sequence_length,
+                self.hidden_size,
+                dtype=BENCHMARK_DTYPE,
+                device=self.device,
             )
             if not should_use_fn(tensor):
                 return None
 
-            torch.cuda.synchronize()
-            stream = torch.cuda.Stream()
-            with torch.cuda.stream(stream):
-                graph_input = tensor.clone()
+            if self.use_cuda_graph:
+                # CUDA graph mode
+                torch.cuda.synchronize()
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    graph_input = tensor.clone()
 
-                # Warmup before capture
-                for _ in range(3):
-                    allreduce_fn(graph_input)
+                    # Warmup before capture
+                    for _ in range(3):
+                        allreduce_fn(graph_input)
 
                 # Capture the graph using context manager
                 with context:
@@ -297,30 +335,50 @@ class CommunicatorBenchmark:
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 
-            torch.cuda.synchronize()
-            for _ in range(num_warmup):
-                graph.replay()
-            torch.cuda.synchronize()
+                torch.cuda.synchronize()
+                for _ in range(num_warmup):
+                    graph.replay()
+                torch.cuda.synchronize()
 
-            torch.cuda.synchronize()
-            start_time = time.perf_counter()
+                torch.cuda.synchronize()
+                start_time = time.perf_counter()
 
-            for _ in range(num_trials):
-                graph.replay()
-            torch.cuda.synchronize()
+                for _ in range(num_trials):
+                    graph.replay()
+                torch.cuda.synchronize()
 
-            end_time = time.perf_counter()
+                end_time = time.perf_counter()
 
-            # Convert to ms and divide by CUDA_GRAPH_CAPTURE_CYCLES
-            return (
-                (end_time - start_time) / num_trials / CUDA_GRAPH_CAPTURE_CYCLES * 1000
-            )
+                # Convert to ms and divide by CUDA_GRAPH_CAPTURE_CYCLES
+                return (
+                    (end_time - start_time)
+                    / num_trials
+                    / CUDA_GRAPH_CAPTURE_CYCLES
+                    * 1000
+                )
+            else:
+                # Direct mode (no CUDA graph)
+                test_tensor = tensor.clone()
+
+                # Warmup
+                for _ in range(num_warmup):
+                    allreduce_fn(test_tensor)
+                torch.cuda.synchronize()
+
+                # Benchmark
+                start_time = time.perf_counter()
+                for _ in range(num_trials):
+                    allreduce_fn(test_tensor)
+                torch.cuda.synchronize()
+                end_time = time.perf_counter()
+
+                # Convert to ms
+                return (end_time - start_time) / num_trials * 1000
 
         except Exception as e:
-            logger.error("CUDA graph benchmark failed: %s", e)
-            raise RuntimeError(
-                f"CUDA graph benchmark failed for communicator: {e}"
-            ) from e
+            mode = "CUDA graph" if self.use_cuda_graph else "direct"
+            logger.error("%s benchmark failed: %s", mode, e)
+            raise RuntimeError(f"{mode} benchmark failed for communicator: {e}") from e
 
 
 def _calculate_speedup_info(comm_results: dict[str, float]) -> str:
@@ -342,7 +400,11 @@ def _calculate_speedup_info(comm_results: dict[str, float]) -> str:
 
 
 def print_results(
-    results: dict[str, dict[str, float]], sequence_lengths: list[int], world_size: int
+    results: dict[str, dict[str, float]],
+    sequence_lengths: list[int],
+    world_size: int,
+    hidden_size: int,
+    use_cuda_graph: bool = True,
 ):
     """Print benchmark results in a formatted table."""
 
@@ -350,8 +412,9 @@ def print_results(
     print("Device Communicator Benchmark Results")
     print(
         f"World Size: {world_size}, Data Type: {BENCHMARK_DTYPE}, "
-        f"Hidden Size: {HIDDEN_SIZE}"
+        f"Hidden Size: {hidden_size}"
     )
+    print(f"Mode: {'CUDA Graph' if use_cuda_graph else 'Direct (no CUDA graph)'}")
     print(f"{'=' * 130}")
 
     # Get all communicator names
@@ -373,7 +436,7 @@ def print_results(
     for seq_len in sequence_lengths:
         if seq_len in results:
             # Calculate tensor size in elements and bytes
-            tensor_elements = seq_len * HIDDEN_SIZE
+            tensor_elements = seq_len * hidden_size
             tensor_bytes = tensor_elements * BENCHMARK_DTYPE.itemsize
 
             # Format tensor size (MB)
@@ -381,7 +444,7 @@ def print_results(
             tensor_size_str = f"{tensor_size_mb:.2f} MB"
 
             # Format tensor shape
-            tensor_shape = f"({seq_len}, {HIDDEN_SIZE})"
+            tensor_shape = f"({seq_len}, {hidden_size})"
 
             row = f"{tensor_shape:<20}{tensor_size_str:<15}"
             for comm in all_comms:
@@ -413,11 +476,24 @@ def main():
     )
 
     parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=DEFAULT_HIDDEN_SIZE,
+        help=f"Hidden size dimension (default: {DEFAULT_HIDDEN_SIZE})",
+    )
+
+    parser.add_argument(
         "--num-warmup", type=int, default=5, help="Number of warmup iterations"
     )
 
     parser.add_argument(
         "--num-trials", type=int, default=50, help="Number of benchmark trials"
+    )
+
+    parser.add_argument(
+        "--no-cuda-graph",
+        action="store_true",
+        help="Disable CUDA graph usage for benchmarking (use direct kernel calls)",
     )
 
     parser.add_argument("--output-json", type=str, help="Output results to JSON file")
@@ -442,8 +518,15 @@ def main():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     # Initialize benchmark
+    use_cuda_graph = not args.no_cuda_graph
     benchmark = CommunicatorBenchmark(
-        rank, world_size, device, cpu_group, args.sequence_lengths
+        rank,
+        world_size,
+        device,
+        cpu_group,
+        args.sequence_lengths,
+        args.hidden_size,
+        use_cuda_graph,
     )
 
     # Run benchmarks
@@ -455,7 +538,7 @@ def main():
                 "Benchmarking sequence length: %s (tensor shape: %s x %s)",
                 seq_len,
                 seq_len,
-                HIDDEN_SIZE,
+                args.hidden_size,
             )
 
         results = benchmark.benchmark_allreduce(
@@ -471,7 +554,13 @@ def main():
 
     # Print results (only rank 0)
     if rank == 0:
-        print_results(all_results, args.sequence_lengths, world_size)
+        print_results(
+            all_results,
+            args.sequence_lengths,
+            world_size,
+            args.hidden_size,
+            use_cuda_graph,
+        )
 
         # Save to JSON if requested
         if args.output_json:
@@ -486,10 +575,11 @@ def main():
             output_data = {
                 "world_size": world_size,
                 "dtype": str(BENCHMARK_DTYPE),
-                "hidden_size": HIDDEN_SIZE,
+                "hidden_size": args.hidden_size,
                 "sequence_lengths": args.sequence_lengths,
                 "num_warmup": args.num_warmup,
                 "num_trials": args.num_trials,
+                "use_cuda_graph": use_cuda_graph,
                 "cuda_graph_capture_cycles": CUDA_GRAPH_CAPTURE_CYCLES,
                 "results": enhanced_results,
             }
