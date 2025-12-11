@@ -285,6 +285,10 @@ class PerunCommunicator:
     ):
         if self.disabled:
             return input_
+        assert input_.device == self._device, (
+            f"this perun communicator is created to work on {self._device}, "
+            f"but the input tensor is on {input_.device}"
+        )
         # Stats (best-effort)
         shape_key = tuple(input_.shape)
         self._allgatherv_shapes_count[shape_key] += 1
@@ -391,11 +395,17 @@ class PerunCommunicator:
         )
 
     def all_reduce(self, input_):
-        # Collect tensor shape statistics
-        # shape_key = tuple(input_.shape)
-        # self._allreduce_shapes_count[shape_key] += 1
+        if self.disabled:
+            return None
+        assert input_.device == self._device, (
+            f"this perun communicator is created to work on {self._device}, "
+            f"but the input tensor is on {input_.device}"
+        )
 
-        # output = self._get_output_buffer(input_)
+        # Collect tensor shape statistics
+        shape_key = tuple(input_.shape)
+        self._allreduce_shapes_count[shape_key] += 1
+
         output = torch.empty_like(input_)
         perun.allreduce(
             self._comm,
