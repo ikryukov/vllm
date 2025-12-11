@@ -206,8 +206,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
-        pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -224,7 +222,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        pynccl_comm.reduce_scatter(output, input_tensor)
+        # Try Perun communicator first if available
+        perun_comm = self.perun_comm
+        pynccl_comm = self.pynccl_comm
+        if perun_comm is not None and not perun_comm.disabled:
+            # Use reduce_scatterv with uniform sizes
+            sizes = [chunk_size] * world_size
+            perun_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
+        else:
+            assert pynccl_comm is not None
+            pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -331,14 +338,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # tensors and lists)
         perun_comm = self.perun_comm
         if perun_comm is not None and not perun_comm.disabled:
-            try:
-                result = perun_comm.all_gatherv(input_, dim=dim, sizes=sizes)
-                return result
-            except Exception as e:
-                # Fall back to pynccl if Perun has any issues
-                logger.warning(
-                    "Perun all_gatherv failed, falling back to pynccl: %s", e
-                )
+            return perun_comm.all_gatherv(input_, dim=dim, sizes=sizes)
         # Fall through to pynccl
 
         world_size = self.world_size
